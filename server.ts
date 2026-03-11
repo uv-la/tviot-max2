@@ -18,6 +18,17 @@ const __dirname = path.dirname(__filename);
 
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || "" });
 
+const JOTFORM_LINKS: Record<string, string> = {
+  'איילון': 'https://form.jotform.com/232780982444060',
+  'שומרה': 'https://form.jotform.com/232783244966467',
+  'הראל': 'https://form.jotform.com/232784541483462',
+  'שלמה': 'https://form.jotform.com/232785215879470',
+  'חקלאי': 'https://form.jotform.com/232784907083464',
+  'פניקס': 'https://form.jotform.com/232785448649473',
+  'הכשרה': 'https://form.jotform.com/232784955516468',
+  'מנורה': 'https://form.jotform.com/233192204698460',
+};
+
 // Ensure uploads and fonts directories exist
 const uploadsDir = path.join(__dirname, "uploads");
 const fontsDir = path.join(__dirname, "fonts");
@@ -237,6 +248,20 @@ async function startServer() {
   app.use(express.urlencoded({ extended: true, limit: '50mb' }));
   app.use("/uploads", express.static(uploadsDir));
   
+  // Short Redirect Routes for WhatsApp
+  app.get("/go/form/:company", (req, res) => {
+    const { company } = req.params;
+    const link = JOTFORM_LINKS[company];
+    if (link) return res.redirect(link);
+    res.status(404).send("Form not found");
+  });
+
+  app.get("/go/s/:id", (req, res) => {
+    const { id } = req.params;
+    const party = req.query.p || 'customer';
+    res.redirect(`${process.env.APP_URL || ''}/status/${id}?party=${party}`);
+  });
+
   // File Retrieval Route with MongoDB fallback
   app.get("/uploads/:filename", async (req, res) => {
     const { filename } = req.params;
@@ -622,6 +647,18 @@ async function startServer() {
     }
   });
 
+  app.get("/api/claims/:id", async (req, res) => {
+    const { id } = req.params;
+    try {
+      if (!ObjectId.isValid(id)) return res.status(400).json({ error: "Invalid ID" });
+      const claim = await db.collection("claims").findOne({ _id: new ObjectId(id) });
+      if (!claim) return res.status(404).json({ error: "Claim not found" });
+      res.json({ ...claim, id: claim._id.toString() });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
   app.post("/api/claims", async (req, res) => {
     const claimData = {
       ...req.body,
@@ -645,6 +682,8 @@ async function startServer() {
 
   app.put("/api/claims/:id", async (req, res) => {
     const { id } = req.params;
+    const incomingLastActivity = req.body.last_activity_at;
+    
     const updateData = {
       ...req.body,
       claim_value: Number(req.body.claim_value) || 0,
@@ -652,11 +691,32 @@ async function startServer() {
       appraiser_chosen: req.body.appraiser_chosen ? 1 : 0,
       has_lien: req.body.has_lien ? 1 : 0,
       keys_handed_over: req.body.keys_handed_over ? 1 : 0,
+      last_activity_at: new Date() // Update activity on every save
     };
     delete updateData.id;
     delete updateData._id;
 
     try {
+      if (!ObjectId.isValid(id)) return res.status(400).json({ error: "Invalid ID" });
+      
+      const currentClaim = await db.collection("claims").findOne({ _id: new ObjectId(id) });
+      if (!currentClaim) return res.status(404).json({ error: "Claim not found" });
+
+      // Optimistic Locking: Check if customer updated while admin was editing
+      if (incomingLastActivity && currentClaim.last_activity_at) {
+        const dbTime = new Date(currentClaim.last_activity_at).getTime();
+        const incomingTime = new Date(incomingLastActivity).getTime();
+        
+        // If DB is newer by more than 1 second (to allow for small clock drifts)
+        if (dbTime > incomingTime + 1000) {
+          console.warn(`Conflict detected for claim ${id}. DB: ${dbTime}, Incoming: ${incomingTime}`);
+          return res.status(409).json({ 
+            error: "התביעה עודכנה על ידי הלקוח בזמן שערכת אותה. אנא סגור את החלון ופתח שוב כדי לראות את העדכונים החדשים.",
+            db_last_activity: currentClaim.last_activity_at
+          });
+        }
+      }
+
       await db.collection("claims").updateOne(
         { _id: new ObjectId(id) },
         { $set: updateData }

@@ -427,32 +427,53 @@ function PublicClaimUpdates({ claimId }: { claimId: string }) {
             {requestedDocs && requestedDocs.length > 0 ? (
               requestedDocs.map((field: string) => {
                 const path = claimInfo[field];
+                const isClaimForm = field === 'claim_form_path';
+                let jotFormLink = '';
+                if (isClaimForm && claimInfo.insurance_company) {
+                  const company = Object.keys(JOTFORM_LINKS).find(name => claimInfo.insurance_company.includes(name));
+                  if (company) jotFormLink = JOTFORM_LINKS[company];
+                }
+
                 return (
                   <div key={field} className="p-3 bg-slate-50 rounded-xl border border-slate-100 space-y-3">
                     <div className="flex items-center justify-between">
                       <div className="flex items-center gap-3">
-                        <div className={`p-2 rounded-lg ${path ? 'bg-emerald-100 text-emerald-600' : 'bg-amber-100 text-amber-600'}`}>
-                          {path ? <Check size={18} /> : <AlertCircle size={18} />}
+                        <div className={`p-2 rounded-lg ${path ? 'bg-emerald-100 text-emerald-600' : (isClaimForm && jotFormLink ? 'bg-indigo-100 text-indigo-600' : 'bg-amber-100 text-amber-600')}`}>
+                          {path ? <Check size={18} /> : (isClaimForm && jotFormLink ? <ExternalLink size={18} /> : <AlertCircle size={18} />)}
                         </div>
                         <div>
                           <p className="text-sm font-bold text-slate-800">{DOC_LABELS[field] || field}</p>
-                          <p className="text-[10px] text-slate-500">{path ? 'המסמך התקבל' : 'חסר - נא להעלות'}</p>
+                          <p className="text-[10px] text-slate-500">
+                            {path ? 'המסמך התקבל' : (isClaimForm && jotFormLink ? 'נא למלא טופס דיגיטלי' : 'חסר - נא להעלות')}
+                          </p>
                         </div>
                       </div>
                       
                       <div className="flex items-center gap-2">
-                        <label className={`px-3 py-1.5 bg-indigo-600 text-white rounded-lg text-xs font-bold hover:bg-indigo-700 transition-colors cursor-pointer flex items-center gap-1 ${uploadingField === field ? 'opacity-50 cursor-not-allowed' : ''}`}>
-                          <Upload size={14} />
-                          {uploadingField === field ? 'מעלה...' : (path ? 'הוסף קובץ' : 'העלאה')}
-                          <input 
-                            type="file" 
-                            className="hidden" 
-                            multiple={['appraiser_report_path', 'appraiser_invoice_path', 'appraiser_photos_path', 'garage_invoice_path'].includes(field)}
-                            disabled={uploadingField === field}
-                            onChange={(e) => handlePublicUpload(e, field)} 
-                            accept="image/*,application/pdf"
-                          />
-                        </label>
+                        {isClaimForm && jotFormLink && !path ? (
+                          <a 
+                            href={jotFormLink} 
+                            target="_blank" 
+                            rel="noreferrer"
+                            className="px-3 py-1.5 bg-indigo-600 text-white rounded-lg text-xs font-bold hover:bg-indigo-700 transition-colors flex items-center gap-1 shadow-sm"
+                          >
+                            <ExternalLink size={14} />
+                            כנס
+                          </a>
+                        ) : (
+                          <label className={`px-3 py-1.5 bg-indigo-600 text-white rounded-lg text-xs font-bold hover:bg-indigo-700 transition-colors cursor-pointer flex items-center gap-1 ${uploadingField === field ? 'opacity-50 cursor-not-allowed' : ''}`}>
+                            <Upload size={14} />
+                            {uploadingField === field ? 'מעלה...' : (path ? 'הוסף קובץ' : 'כנס')}
+                            <input 
+                              type="file" 
+                              className="hidden" 
+                              multiple={['appraiser_report_path', 'appraiser_invoice_path', 'appraiser_photos_path', 'garage_invoice_path'].includes(field)}
+                              disabled={uploadingField === field}
+                              onChange={(e) => handlePublicUpload(e, field)} 
+                              accept="image/*,application/pdf"
+                            />
+                          </label>
+                        )}
                       </div>
                     </div>
 
@@ -2125,6 +2146,19 @@ ${statusLink}
         setEditingClaim(null);
         setInitialFormData(null);
         showToast(editingClaim ? 'התביעה עודכנה בהצלחה' : 'התביעה נשמרה בהצלחה');
+      } else if (response.status === 409) {
+        const errorData = await response.json();
+        setConfirmModal({
+          title: 'התנגשות בעריכה',
+          message: errorData.error,
+          confirmText: 'רענן נתונים',
+          onConfirm: () => {
+            fetchClaims();
+            setIsModalOpen(false);
+            setEditingClaim(null);
+            setConfirmModal(null);
+          }
+        });
       } else {
         const errorData = await response.json().catch(() => ({}));
         console.error('Server error saving claim:', errorData);
@@ -2157,15 +2191,26 @@ ${statusLink}
     });
   };
 
-  const openModal = (claim: Claim | null = null) => {
+  const openModal = async (claim: Claim | null = null) => {
     setModalTab('details');
     let initialData: any;
     if (claim) {
+      // Fetch latest data for this specific claim to ensure we have the latest documents
+      try {
+        const res = await fetch(`/api/claims/${claim.id}`);
+        if (res.ok) {
+          const latestClaim = await res.json();
+          claim = { ...latestClaim, id: latestClaim._id?.toString() || latestClaim.id };
+        }
+      } catch (err) {
+        console.error("Failed to fetch latest claim data", err);
+      }
+
       if (claim.has_customer_updates) {
         showToast('מסמכים חדשים עודכנו במערכת על ידי הלקוח', 'success');
         fetch(`/api/claims/${claim.id}/clear-updates`, { method: 'POST' })
           .then(() => {
-            setClaims(prev => prev.map(c => c.id === claim.id ? { ...c, has_customer_updates: false } : c));
+            setClaims(prev => prev.map(c => c.id === claim!.id ? { ...c, has_customer_updates: false, customer_updated_docs: [] } : c));
           })
           .catch(err => console.error("Failed to clear updates flag", err));
       }
@@ -2260,7 +2305,10 @@ ${statusLink}
         appraiser_fee: claim.appraiser_fee || 0,
         repair_amount: claim.repair_amount || 0,
         demand_letter_path: claim.demand_letter_path || '',
-        marked_docs: claim.marked_docs || []
+        marked_docs: claim.marked_docs || [],
+        last_activity_at: claim.last_activity_at,
+        has_customer_updates: false, // Clear flag in formData as admin is viewing it
+        customer_updated_docs: claim.customer_updated_docs || [] // Keep list for highlighting
       };
     } else {
       setEditingClaim(null);
@@ -2437,24 +2485,33 @@ ${statusLink}
 
     const isClaimFormMarked = docs.includes('claim_form_path');
     let jotFormLink = '';
+    let shortJotFormLink = '';
     if (isClaimFormMarked && formData.insurance_company) {
       const company = Object.keys(JOTFORM_LINKS).find(name => formData.insurance_company.includes(name));
       if (company) {
         jotFormLink = JOTFORM_LINKS[company];
+        shortJotFormLink = `${window.location.origin}/go/form/${encodeURIComponent(company)}`;
       }
     }
 
-    const docList = docs.map(f => DOC_LABELS[f] || f).join(', ');
-    const jotFormText = jotFormLink ? `\nניתן למלא טופס הודעה דיגיטלי כאן: ${jotFormLink}\n` : '';
-    const publicUrl = `${window.location.origin}/status/${editingClaim?.id || ''}?party=${party}`;
+    // Filter out claim form from docList if we have a digital link
+    const docsToUpload = jotFormLink ? docs.filter(f => f !== 'claim_form_path') : docs;
+    const docList = docsToUpload.map(f => DOC_LABELS[f] || f).join(', ');
     
+    const jotFormText = shortJotFormLink ? `\n📝 כנס למילוי טופס דיגיטלי:\n${shortJotFormLink}\n` : '';
+    const shortPublicUrl = `${window.location.origin}/go/s/${editingClaim?.id || ''}?p=${party}`;
+    
+    const statusText = formData.status ? `\nסטטוס תביעה: ${formData.status}` : '';
+    const estTimeText = formData.estimated_processing_days ? `\nזמן טיפול משוער: ${formData.estimated_processing_days} ימים` : '';
+
     const message = `שלום ${name},
 
 לצורך המשך טיפול בתביעה (רכב ${formData.car_number}), נשמח אם תעלה את המסמכים הבאים:
 ${docList}
+${statusText}${estTimeText}
 ${jotFormText}
-ניתן להעלות את המסמכים בקישור הבא:
-${publicUrl}
+🔗 כנס לסטטוס / העלאת מסמכים:
+${shortPublicUrl}
 
 בברכה,
 צוות התביעות`;
@@ -4354,6 +4411,7 @@ ${publicUrl}
         : ((formData as any)[field] ? [(formData as any)[field]] : []);
       const hasFiles = paths.length > 0;
       const isMarked = formData.marked_docs?.includes(field);
+      const isUpdatedByCustomer = formData.customer_updated_docs?.includes(field);
 
       const toggleMarked = () => {
         const current = formData.marked_docs || [];
@@ -4365,7 +4423,7 @@ ${publicUrl}
       };
 
       return (
-        <div className={`group p-2.5 border rounded-xl transition-all ${isMarked ? 'border-indigo-300 bg-white shadow-sm' : 'border-slate-200 bg-white/50'}`}>
+        <div className={`group p-2.5 border rounded-xl transition-all ${isUpdatedByCustomer ? 'border-red-400 bg-red-50 shadow-md animate-pulse' : (isMarked ? 'border-indigo-300 bg-white shadow-sm' : 'border-slate-200 bg-white/50')}`}>
           <div className="flex items-center justify-between mb-2">
             <div className="flex items-center gap-2.5 flex-1 min-w-0">
               <button 
@@ -4377,11 +4435,15 @@ ${publicUrl}
                 <Check size={14} strokeWidth={3} />
               </button>
               <div className="truncate">
-                <p className="text-xs font-bold text-slate-700 truncate leading-tight">{label}</p>
+                <p className="text-xs font-bold text-slate-700 truncate leading-tight flex items-center gap-1">
+                  {label}
+                  {isUpdatedByCustomer && <span className="w-2 h-2 bg-red-500 rounded-full animate-ping"></span>}
+                </p>
                 {hasFiles ? (
                   <p className="text-[9px] text-emerald-600 font-bold flex items-center gap-1">
                     <CheckCircle2 size={10} />
                     {paths.length} קבצים קיימים
+                    {isUpdatedByCustomer && <span className="text-red-500">(חדש!)</span>}
                   </p>
                 ) : (
                   isMarked && <p className="text-[9px] text-rose-500 font-bold">ממתין להעלאה</p>
